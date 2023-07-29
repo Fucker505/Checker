@@ -3,7 +3,9 @@ import random
 import string
 from aiohttp import ClientSession, ClientResponse
 from enum import Enum
-from typing import List, Callable
+from re import search
+from typing import Callable, List, Union, Optional, Dict, Any
+
 
 class RequestMethods(Enum):
     GET = "GET"
@@ -15,39 +17,28 @@ class RequestMethods(Enum):
 
 
 class Checker:
-    def __init__(self, cc: str, mes: str, ano: str, cvv: str) -> None:
-        """
-        Initialize the Checker object with credit card information.
+    @staticmethod
+    def close_session(session: ClientSession) -> None:
+        """Close an aiohttp ClientSession.
 
         Args:
-            cc (str): Credit card number as a string.
-            mes (str): Expiry month as a string.
-            ano (str): Expiry year as a string.
-            cvv (str): CVV as a string.
+            session (ClientSession): The aiohttp ClientSession to close.
 
-        Raises:
-            TypeError: If any of the arguments is not a string.
+        Returns:
+            None
         """
-        if not all(isinstance(x, str) for x in [cc, mes, ano, cvv]):
-            raise TypeError("Invalid type data!")
-        self.cc = cc
-        self.mes = mes
-        self.ano = ano
-        self.cvv = cvv
-        self.email = self._get_random_email()
-        self.session = None
-
-    def close_connection(self) -> None:
-        """
-        Close the HTTP session if it's open.
-        """
-        if self.session:
-            asyncio.create_task(self.session.close())
-            self.session = None
+        if isinstance(session, ClientSession):
+            asyncio.create_task(session.close())
 
     @staticmethod
     async def exec_request(
-        url: str, method: RequestMethods, headers: dict = None, data=None, session=None
+        url: str,
+        method: RequestMethods,
+        headers: Optional[Dict[str, str]] = None,
+        data: Any = None,
+        params: Optional[Dict[str, Any]] = None,
+        session: Optional[ClientSession] = None,
+        close_session: bool = False,
     ) -> ClientResponse:
         """
         Execute an HTTP request using aiohttp.
@@ -55,25 +46,38 @@ class Checker:
         Args:
             url (str): The URL for the request.
             method (RequestMethods): The HTTP method for the request.
-            headers (dict, optional): Optional headers for the request.
-            data (any, optional): Optional data to send in the request body.
+            headers (Dict[str, str], optional): Optional headers for the request.
+            data (Any, optional): Optional data to send in the request body.
+            params (Dict[str, Any], optional): Optional query parameters for the request.
             session (ClientSession, optional): Optional aiohttp ClientSession to reuse the same session.
+            close_session (bool, optional): Whether to close the session after the request is done.
 
         Returns:
             ClientResponse: The aiohttp ClientResponse.
         """
-        assert isinstance(method, RequestMethods), "You must provide a valid HTTP method!"
+        assert isinstance(
+            method, RequestMethods
+        ), "You must provide a valid HTTP method!"
         if headers is not None:
             assert isinstance(
                 headers, dict
             ), "You must provide a valid dictionary of headers!"
+        if params is not None:
+            assert isinstance(
+                params, dict
+            ), "You must provide a valid dictionary of params!"
         if session is None:
             session = ClientSession()
         else:
             assert isinstance(
                 session, ClientSession
             ), "You must provide a valid ClientSession!"
-        req = await session.request(url=url, method=method.value, headers=headers, data=data)
+        req = await session.request(
+            url=url, method=method.value, headers=headers, data=data, params=params
+        )
+        if close_session:
+            asyncio.create_task(session.close())
+            session = None
         return req
 
     @staticmethod
@@ -89,6 +93,10 @@ class Checker:
         Returns:
             str: The extracted substring.
         """
+        assert isinstance(text, str), "The argument 'text' must be a string."
+        assert isinstance(a, str), "The argument 'a' must be a string."
+        assert isinstance(b, str), "The argument 'b' must be a string."
+
         return text.split(a)[1].split(b)[0]
 
     @staticmethod
@@ -124,7 +132,7 @@ class Checker:
             i = line.find(":")
             headers_created[line[:i].strip()] = line[i + 1 :].strip()
         return headers_created
-    
+
     @staticmethod
     async def massRequests(func: Callable, quantity: int = 10, *args) -> List:
         """
@@ -133,12 +141,41 @@ class Checker:
         Args:
             func (Callable): The coroutine function to execute in each request.
             quantity (int, optional): The number of requests to perform. Default is 10.
+            *args: Additional arguments to pass to the coroutine function.
 
         Returns:
             List: A list of results from each coroutine.
         """
-        assert isinstance(func, Callable) and isinstance(quantity, int), "The 'func' parameter must be a Callable, and 'quantity' must be an integer."
-        tasks = [func(args) for _ in range(quantity)]
+        assert isinstance(func, Callable) and isinstance(
+            quantity, int
+        ), "The 'func' parameter must be a Callable, and 'quantity' must be an integer."
+        tasks = [func(*args) for _ in range(quantity)]
         results = await asyncio.gather(*tasks)
         return results
-    
+
+    @staticmethod
+    async def get_bin(bin_i: str) -> Union[dict, None, bool]:
+        """
+        Get information about a BIN.
+
+        Args:
+            bin_i (str): The BIN.
+
+        Returns:
+            Union[dict, None, bool]: A dictionary containing information about the BIN if found,
+            None if the request was unsuccessful,
+            or False if the BIN number is not valid.
+        """
+        bin_i = search(r"\b[3-7]\d{5,15}\b", bin_i)
+        if not bin_i:
+            return False
+        bin_i = bin_i.group()
+        resp = await Checker.exec_request(
+            f"https://bins.antipublic.cc/bins/{bin_i}",
+            RequestMethods.GET,
+            close_session=True,
+        )
+        if resp.status == 200:
+            return await resp.json()
+        else:
+            return None
